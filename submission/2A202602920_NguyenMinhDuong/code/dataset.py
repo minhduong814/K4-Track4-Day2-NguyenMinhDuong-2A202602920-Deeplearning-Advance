@@ -27,7 +27,9 @@ def load_split(labels_dir: str | Path, fold: int = 0):
         raise ValueError(f"fold must be in 0..4, got {fold}")
     labels_dir = Path(labels_dir)
     frames = []
-    required = {"Filename", "Label", "Species"}
+    # Các split chính thức hiện chỉ có Filename và Label; Species chỉ có trong
+    # labels.csv ở một số phiên bản của repo DeepWeeds nên không được bắt buộc.
+    required = {"Filename", "Label"}
     for split in ("train", "val", "test"):
         path = labels_dir / f"{split}_subset{fold}.csv"
         if not path.is_file():
