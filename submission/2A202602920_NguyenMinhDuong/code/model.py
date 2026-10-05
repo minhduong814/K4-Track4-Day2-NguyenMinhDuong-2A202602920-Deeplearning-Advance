@@ -102,6 +102,28 @@ def count_params(model) -> float:
     return sum(parameter.numel() for parameter in model.parameters()) / 1_000_000.0
 
 
+_PROFILING_BUFFER_NAMES = {"total_ops", "total_params"}
+
+
+def remove_profiling_buffers(model) -> int:
+    """Remove temporary buffers registered by THOP and return how many were removed."""
+    removed = 0
+    for module in model.modules():
+        for name in _PROFILING_BUFFER_NAMES:
+            if name in module._buffers:
+                module._buffers.pop(name)
+                removed += 1
+    return removed
+
+
+def clean_profiling_state_dict(state_dict):
+    """Return a state dict without THOP's non-model ``total_*`` buffers."""
+    return type(state_dict)(
+        (key, value) for key, value in state_dict.items()
+        if key.rsplit(".", 1)[-1] not in _PROFILING_BUFFER_NAMES
+    )
+
+
 def count_gmacs(model, img_size: int = 224) -> float:
     """Count multiply-accumulates for one image with THOP and return GMAC."""
     if img_size <= 0:
@@ -117,11 +139,15 @@ def count_gmacs(model, img_size: int = 224) -> float:
     except StopIteration:
         device, dtype = torch.device("cpu"), torch.float32
     was_training = model.training
+    # THOP registers total_ops/total_params on the supplied model. Always clean
+    # them so they never leak into training checkpoints.
+    remove_profiling_buffers(model)
     model.eval()
     dummy = torch.zeros(1, 3, img_size, img_size, device=device, dtype=dtype)
     try:
-        with torch.inference_mode():
+        with torch.no_grad():
             macs, _ = profile(model, inputs=(dummy,), verbose=False)
     finally:
+        remove_profiling_buffers(model)
         model.train(was_training)
     return float(macs) / 1_000_000_000.0

@@ -318,9 +318,19 @@ def run(cfg: Config) -> dict:
     ema = EMA(network, cfg.ema_decay) if cfg.ema_decay is not None else None
 
     checkpoint_path = output / "best.pt"
+    history_path = output / "history.csv"
     history: list[dict] = []
     best_f1, best_epoch = -math.inf, -1
-    for epoch in range(1, cfg.epochs + 1):
+    if checkpoint_path.is_file() and history_path.is_file():
+        cached_history = pd.read_csv(history_path)
+        if len(cached_history) >= cfg.epochs and int(cached_history["epoch"].max()) >= cfg.epochs:
+            history = cached_history.iloc[:cfg.epochs].to_dict(orient="records")
+            cached_checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            best_f1 = float(cached_checkpoint["val_macro_f1"])
+            best_epoch = int(cached_checkpoint["epoch"])
+            print(f"[{cfg.exp_id} seed={cfg.seed}] reuse completed {cfg.epochs}-epoch run")
+
+    for epoch in range(len(history) + 1, cfg.epochs + 1):
         start = time.perf_counter()
         train_stats = train_one_epoch(
             network, train_loader, criterion, optimizer, scheduler, scaler, cfg, device, ema
@@ -339,11 +349,11 @@ def run(cfg: Config) -> dict:
             "seconds": time.perf_counter() - start,
         }
         history.append(row)
-        pd.DataFrame(history).to_csv(output / "history.csv", index=False)
+        pd.DataFrame(history).to_csv(history_path, index=False)
         if metrics["macro_f1"] > best_f1:
             best_f1, best_epoch = metrics["macro_f1"], epoch
             torch.save({
-                "model": eval_model.state_dict(),
+                "model": model_module.clean_profiling_state_dict(eval_model.state_dict()),
                 "epoch": epoch,
                 "val_macro_f1": best_f1,
                 "config": asdict(cfg),
@@ -353,7 +363,9 @@ def run(cfg: Config) -> dict:
               f"val_f1={metrics['macro_f1']:.4f} val_top1={metrics['top1']:.4f}")
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    network.load_state_dict(checkpoint["model"])
+    model_module.remove_profiling_buffers(network)
+    clean_state = model_module.clean_profiling_state_dict(checkpoint["model"])
+    network.load_state_dict(clean_state)
     val_names, val_target, val_logits, val_loss = evaluate(network, val_loader, criterion, device)
     val_probs = _probabilities(val_logits)
     val_metrics = compute_metrics(val_target, val_probs.argmax(1), val_probs)
